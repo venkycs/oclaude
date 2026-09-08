@@ -144,7 +144,9 @@ LAST_OUT="$(printf '2\nx\n\n' | s 2>&1)"
 expect_in "setup masks stored keys" "sk-or-v1…aaaa"
 expect_in "setup removes on x" "Removed"
 if grep -q zai "$SETUP_HOME/.local/share/opencode/auth.json"; then bad "key actually removed"; else ok "key actually removed"; fi
-perms="$(stat -f '%Lp' "$SETUP_HOME/.local/share/opencode/auth.json" 2>/dev/null || stat -c '%a' "$SETUP_HOME/.local/share/opencode/auth.json")"
+authjson="$SETUP_HOME/.local/share/opencode/auth.json"
+# GNU stat -c works on Linux and fails on macOS (BSD stat needs -f '%Lp')
+perms="$(stat -c '%a' "$authjson" 2>/dev/null || stat -f '%Lp' "$authjson" 2>/dev/null)"
 [[ "$perms" == "600" ]] && ok "auth.json is 0600" || bad "auth.json is 0600" "mode=$perms"
 
 echo "== update & installer (file:// sources, never the network) =="
