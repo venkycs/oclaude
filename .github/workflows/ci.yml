@@ -1,0 +1,30 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Syntax check
+        run: |
+          bash -n bin/oclaude
+          bash -n install.sh
+          bash -n tests/run.sh
+      - name: ShellCheck (non-blocking)
+        run: |
+          if command -v shellcheck >/dev/null 2>&1; then
+            shellcheck bin/oclaude install.sh tests/run.sh || true
+          else
+            sudo apt-get install -y shellcheck >/dev/null 2>&1 \
+              && shellcheck bin/oclaude install.sh tests/run.sh || true
+          fi
+        if: runner.os == 'Linux'
+      - name: Tests
+        run: ./tests/run.sh
