@@ -1,55 +1,112 @@
 # oclaude
 
-opencode, then claude.
+opencode, then claude — now with [OpenRouter](https://openrouter.ai).
 
-A tiny wrapper that lets you run [Claude Code](https://github.com/anthropics/claude-code) against
-any of the coding plans you've already configured in [opencode](https://opencode.ai) — Z.ai (GLM),
-MiniMax, or Alibaba (Qwen) — instead of your Anthropic account, without hand-editing environment
-variables every time.
+A tiny wrapper that runs [Claude Code](https://github.com/anthropics/claude-code) against
+alternative providers — Z.ai (GLM), MiniMax, Alibaba (Qwen), or anything on OpenRouter — instead
+of your Anthropic account, without hand-editing environment variables every time.
 
-It reuses opencode's own stored API keys (`~/.local/share/opencode/auth.json`), so there's nothing
-to configure and no secrets live in this script.
+It works **standalone or on top of [opencode](https://opencode.ai)**: API keys are stored in
+opencode's own format (`~/.local/share/opencode/auth.json`), created for you by `oclaude setup`.
+If you already use opencode, your existing keys are picked up as-is; if you don't, oclaude
+manages that file itself.
 
-## Requirements
-
-- [opencode](https://opencode.ai) installed and logged in to at least one of the plans below
-  (`opencode auth login`)
-- [Claude Code](https://claude.com/claude-code) installed (`claude` on your `PATH`)
-- `bash` and `python3` (used only to read opencode's local auth file)
-
-## Install
+## One-touch install
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/venkycs/oclaude/main/bin/oclaude -o ~/.local/bin/oclaude
-chmod +x ~/.local/bin/oclaude
+curl -fsSL https://raw.githubusercontent.com/venkycs/oclaude/main/install.sh | bash
 ```
 
-Make sure `~/.local/bin` is on your `PATH`.
+The installer puts `oclaude` in `~/.local/bin`, checks your `PATH` and `python3`, offers to
+install Claude Code itself if missing, and offers to run `oclaude setup` so you can paste your
+API keys right away. (Manual alternative:
+`curl -fsSL .../raw/main/bin/oclaude -o ~/.local/bin/oclaude && chmod +x ~/.local/bin/oclaude`.)
 
-## Usage
+## Quick start
 
 ```sh
-oclaude
+oclaude setup     # paste API keys (validated for OpenRouter, stored opencode-compatible)
+oclaude           # pick a plan, launch Claude Code
 ```
 
-You'll get a menu:
+You'll get a menu (`✓` = a key is configured):
 
 ```
 Select a plan for Claude Code:
   1) Z.AI Coding Plan (GLM)
   2) MiniMax Token Plan
   3) Alibaba Token Plan (Qwen)
-  4) Anthropic default (your normal Claude account/API key)
+  4) Anthropic default (your normal Claude account/API key) ✓
+  5) OpenRouter: Z.AI GLM ✓
+  6) OpenRouter: MiniMax ✓
+  7) OpenRouter: Qwen ✓
+  8) OpenRouter: any model ($OPENROUTER_MODEL) ✓
 >
 ```
 
-Pick one, and it `exec`s straight into `claude` with the right `ANTHROPIC_BASE_URL`,
-`ANTHROPIC_AUTH_TOKEN`, and model-tier env vars set for that plan — only for that process, your
-shell's own environment is untouched. Any extra args are passed straight through to `claude`:
+It `exec`s straight into `claude` with the right `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`,
+and model-tier env vars for that plan — only for that process; your shell's environment is
+untouched. Any extra args pass through to `claude`:
 
 ```sh
 oclaude -p "fix the failing test"
 ```
+
+### Skipping the menu
+
+Give the plan as the first argument — menu number, plan id, or any unique prefix:
+
+```sh
+oclaude zai
+oclaude 7
+oclaude openrouter-qwen -p "..."
+OPENROUTER_MODEL=z-ai/glm-5.3 oclaude 8   # any model OpenRouter serves
+```
+
+If a plan's key is missing and you're in a terminal, oclaude offers to take it right there and
+saves it (OpenRouter keys are validated against the API before storing).
+
+## Intelligent model handling
+
+The OpenRouter options fetch OpenRouter's live model catalog (cached 24 h in
+`~/.cache/oclaude/`):
+
+- **Alias resolution** — you (and the built-in plans) say `qwen/qwen3.8-max`, oclaude resolves it
+  to the newest dated snapshot (e.g. `qwen/qwen3.8-max-0902`) automatically. Plans never go stale
+  when OpenRouter rotates snapshots.
+- **Unknown models rejected up front** — `OPENROUTER_MODEL=acme/nope oclaude 8` fails with a
+  pointer to `oclaude models` instead of a cryptic first-request error.
+- **Gateway model discovery** — OpenRouter plans set `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1`,
+  so Claude Code's `/model` picker lists what the gateway actually serves.
+- **Browse the catalog**:
+
+  ```sh
+  oclaude models          # everything, with context window and $/M pricing
+  oclaude models glm      # filtered
+  ```
+
+- **Offline-safe** — `OCLAUDE_OFFLINE=1` (or just no network) skips fetching and falls back to
+  the pinned model ids below.
+
+## Commands & env
+
+| Command | Does |
+|---|---|
+| `oclaude` | interactive plan menu |
+| `oclaude <plan\|number> [claude args]` | launch directly |
+| `oclaude setup` | add/remove API keys (masked display, OpenRouter validation) |
+| `oclaude models [filter]` | list OpenRouter models live |
+| `oclaude update` | self-update from this repo |
+| `oclaude help` / `version` | usage / version |
+
+| Env | Meaning |
+|---|---|
+| `OPENROUTER_API_KEY` | OpenRouter key; wins over the stored one |
+| `OPENROUTER_MODEL` | model for plan 8 (alias or dated slug) |
+| `OCLAUDE_OFFLINE=1` | never hit the network; cached/pinned values only |
+| `OCLAUDE_MODELS_TTL` | catalog cache seconds (default 86400) |
+| `OCLAUDE_SKIP_VERIFY=1` | skip OpenRouter key validation in setup |
+| `OCLAUDE_REPO` | self-update source (forks) |
 
 ## What it sets, per plan
 
@@ -59,6 +116,50 @@ oclaude -p "fix the failing test"
 | MiniMax | `api.minimax.io/anthropic` | all tiers → `MiniMax-M3` |
 | Alibaba (Qwen) | `token-plan.ap-southeast-1.maas.aliyuncs.com/apps/anthropic` | Haiku → `qwen3.6-flash`, Sonnet/Opus → `qwen3.8-max`, subagent → `qwen3.7-max` |
 | Anthropic default | — | unsets all overrides |
+| OpenRouter: GLM | `openrouter.ai/api` | Haiku → `z-ai/glm-4.7`, Sonnet/Opus → `z-ai/glm-5.2` |
+| OpenRouter: MiniMax | `openrouter.ai/api` | all tiers → `minimax/minimax-m3` |
+| OpenRouter: Qwen | `openrouter.ai/api` | Haiku → `qwen/qwen3.6-flash`, Sonnet/Opus → newest `qwen/qwen3.8-max-*`, subagent → `qwen/qwen3.7-max` |
+| OpenRouter: any model | `openrouter.ai/api` | every tier → `$OPENROUTER_MODEL` (resolved) |
+
+The OpenRouter plans mirror the direct ones but bill to your OpenRouter credit. OpenRouter speaks
+Claude Code's native Anthropic protocol (`https://openrouter.ai/api`, Bearer auth via
+`ANTHROPIC_AUTH_TOKEN`), so no proxy is needed; `ANTHROPIC_API_KEY` stays unset so Claude Code
+uses the right header.
+
+## Requirements
+
+- `bash`, `python3`, `curl`
+- [Claude Code](https://claude.com/claude-code) (`claude` on your `PATH`) — the installer can set
+  this up for you
+- An account/key for whichever plans you want (OpenRouter, Z.ai, MiniMax, or Alibaba); keys for
+  plans you don't pick are never needed
+
+## Developing
+
+```sh
+git clone https://github.com/venkycs/oclaude && cd oclaude
+./tests/run.sh        # full suite: stubbed claude, fake $HOME, no network, <5s
+bin/oclaude help
+```
+
+The suite covers every plan's env vars, alias resolution (newest-snapshot wins, `:batch`
+variants excluded), unknown-model rejection, setup (add/mask/remove, `0600` perms), selection
+forms, self-update, and the installer — all offline, using a seeded catalog cache and `file://`
+sources. CI runs it on Ubuntu and macOS (`.github/workflows/ci.yml`).
+
+To try your checkout without installing it system-wide:
+
+```sh
+# install your working copy instead of the released one
+OCLAUDE_SRC="file://$PWD" bash install.sh
+
+# or point an installed oclaude's self-update at your checkout
+OCLAUDE_REPO="file://$PWD" oclaude update
+```
+
+Handy while iterating: `OCLAUDE_OFFLINE=1` (skip catalog fetches), `OCLAUDE_SKIP_VERIFY=1`
+(skip key validation), `OCLAUDE_INSTALL_DIR`, `OCLAUDE_MODELS_TTL`. Keep `bin/oclaude` a single
+portable bash file — no build step, that's the point.
 
 ## License
 

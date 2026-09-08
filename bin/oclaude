@@ -1,31 +1,326 @@
 #!/usr/bin/env bash
-# oclaude: pick one of the opencode-configured coding plans and launch Claude Code against it.
+# oclaude: pick a coding plan/provider and launch Claude Code against it.
+#
+# Works standalone or on top of opencode: keys live in opencode's auth.json
+# (~/.local/share/opencode/auth.json), created on demand by `oclaude setup`.
 set -euo pipefail
 
+VERSION="1.1.0"
 AUTH_FILE="$HOME/.local/share/opencode/auth.json"
-if [[ ! -f "$AUTH_FILE" ]]; then
-  echo "opencode auth file not found: $AUTH_FILE" >&2
-  exit 1
-fi
+CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/oclaude"
+MODELS_CACHE="$CACHE_DIR/openrouter-models.json"
+MODELS_TTL="${OCLAUDE_MODELS_TTL:-86400}"
+REPO_RAW="${OCLAUDE_REPO:-https://raw.githubusercontent.com/venkycs/oclaude/main}"
+OPENROUTER_API="https://openrouter.ai/api"
+OPENROUTER_KEY_URL="https://openrouter.ai/api/v1/key"
+OPENROUTER_MODELS_URL="https://openrouter.ai/api/v1/models"
 
-PLAN_IDS=(zai-coding-plan minimax-coding-plan alibaba-token-plan anthropic)
+PLAN_IDS=(zai-coding-plan minimax-coding-plan alibaba-token-plan anthropic \
+          openrouter-glm openrouter-minimax openrouter-qwen openrouter-custom)
 PLAN_LABELS=(
   "Z.AI Coding Plan (GLM)"
   "MiniMax Token Plan"
   "Alibaba Token Plan (Qwen)"
   "Anthropic default (your normal Claude account/API key)"
+  "OpenRouter: Z.AI GLM"
+  "OpenRouter: MiniMax"
+  "OpenRouter: Qwen"
+  "OpenRouter: any model (\$OPENROUTER_MODEL)"
 )
 
-echo "Select a plan for Claude Code:"
-for i in "${!PLAN_LABELS[@]}"; do
-  printf '  %d) %s\n' "$((i + 1))" "${PLAN_LABELS[$i]}"
-done
-read -r -p "> " choice
+# auth.json entries oclaude can manage, in setup-menu order.
+PROVIDERS=(openrouter zai-coding-plan minimax-coding-plan alibaba-token-plan)
+PROVIDER_LABELS=("OpenRouter" "Z.AI Coding Plan (GLM)" "MiniMax Token Plan" "Alibaba Token Plan (Qwen)")
 
-idx=$((choice - 1))
-if (( idx < 0 || idx >= ${#PLAN_IDS[@]} )); then
-  echo "Invalid choice" >&2
-  exit 1
+# --- auth.json helpers (opencode-compatible) -------------------------------
+
+auth_get() { # $1 = entry id -> prints stored key, empty if none
+  [[ -f "$AUTH_FILE" ]] || return 0
+  python3 - "$AUTH_FILE" "$1" <<'PY'
+import json, sys
+try:
+    with open(sys.argv[1]) as f:
+        d = json.load(f)
+except Exception:
+    sys.exit(0)
+v = d.get(sys.argv[2]) or {}
+k = v.get('key') if isinstance(v, dict) else None
+print(k if isinstance(k, str) else '')
+PY
+}
+
+auth_write() { # $1 = entry id, $2 = key or empty to remove
+  mkdir -p "$(dirname "$AUTH_FILE")"
+  python3 - "$AUTH_FILE" "$1" "$2" <<'PY'
+import json, os, sys
+path, pid, key = sys.argv[1], sys.argv[2], sys.argv[3]
+try:
+    with open(path) as f:
+        d = json.load(f)
+except Exception:
+    d = {}
+if key:
+    d[pid] = {"type": "api", "key": key}
+else:
+    d.pop(pid, None)
+tmp = path + '.tmp'
+with open(tmp, 'w') as f:
+    json.dump(d, f, indent=2)
+os.replace(tmp, path)
+PY
+  chmod 600 "$AUTH_FILE"
+}
+
+mask() { # $1 = key -> masked form for display
+  local k="$1"
+  if (( ${#k} > 12 )); then printf '%s…%s' "${k:0:8}" "${k: -4}"
+  else printf '%s…' "${k:0:4}"; fi
+}
+
+# --- OpenRouter catalog: fetch, cache, resolve ------------------------------
+
+catalog() { # ensure a fresh models cache; success (0) = cache usable
+  mkdir -p "$CACHE_DIR"
+  local fresh=0
+  if [[ -f "$MODELS_CACHE" ]]; then
+    if [[ $(python3 -c '
+import os, sys, time
+print(1 if time.time() - os.path.getmtime(sys.argv[1]) < float(sys.argv[2]) else 0)
+' "$MODELS_CACHE" "$MODELS_TTL") == "1" ]]; then
+      fresh=1
+    fi
+  fi
+  if (( ! fresh )) && [[ "${OCLAUDE_OFFLINE:-}" != "1" ]] && command -v curl >/dev/null 2>&1; then
+    if curl -fsSL --max-time 20 "$OPENROUTER_MODELS_URL" -o "$MODELS_CACHE"; then fresh=1; else rm -f "$MODELS_CACHE"; fi
+  fi
+  (( fresh ))
+}
+
+resolve_model() { # $1 = preferred slug/alias, $2 = fallback -> prints best slug
+  local out=""
+  out=$(python3 - "$MODELS_CACHE" "$1" 2>/dev/null <<'PY'
+import json, sys
+try:
+    models = json.load(open(sys.argv[1])).get('data', [])
+except Exception:
+    sys.exit(0)
+want = sys.argv[2]
+ids = [m.get('id', '') for m in models]
+if want in ids:
+    print(want)
+    sys.exit(0)
+# alias: prefer the newest dated snapshot of the same base model
+# (qwen/qwen3.8-max -> qwen/qwen3.8-max-0902), skipping :batch/:free variants
+base = want.split(':')[0]
+cands = [m for m in models
+         if m.get('id', '').startswith(base + '-') and ':' not in m['id']]
+cands.sort(key=lambda m: m.get('created') or 0, reverse=True)
+if cands:
+    print(cands[0]['id'])
+PY
+) || out=""
+  echo "${out:-$2}"
+}
+
+or_verify() { # $1 = key -> 0 valid, 1 rejected, 2 unverifiable (network)
+  [[ "${OCLAUDE_SKIP_VERIFY:-}" == "1" ]] && return 0
+  local code
+  code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 \
+              -H "Authorization: Bearer $1" "$OPENROUTER_KEY_URL") || return 2
+  [[ "$code" == "200" ]] && return 0
+  [[ "$code" == "401" || "$code" == "403" ]] && return 1
+  return 2
+}
+
+# --- subcommands ------------------------------------------------------------
+
+cmd_setup() {
+  echo "oclaude setup — API keys are stored in $AUTH_FILE (opencode-compatible)."
+  if [[ ! -f "$AUTH_FILE" ]]; then
+    echo "The file will be created; opencode users keep their existing keys."
+  fi
+  echo
+  local i id label cur hint n idx k rc tries
+  while :; do
+    for i in "${!PROVIDERS[@]}"; do
+      id="${PROVIDERS[$i]}"; label="${PROVIDER_LABELS[$i]}"
+      cur="$(auth_get "$id")"
+      if [[ -n "$cur" ]]; then hint="  [configured: $(mask "$cur")]"; else hint=""; fi
+      printf '  %d) %s%s\n' "$((i + 1))" "$label" "$hint"
+    done
+    read -r -p "Configure which? (number, Enter to finish): " n || return 0
+    [[ "$n" =~ ^[0-9]+$ ]] || { echo "Bye."; return 0; }
+    idx=$((n - 1))
+    if (( idx < 0 || idx >= ${#PROVIDERS[@]} )); then echo "Invalid choice."; continue; fi
+    id="${PROVIDERS[$idx]}"; label="${PROVIDER_LABELS[$idx]}"
+    cur="$(auth_get "$id")"
+    read -r -p "Paste $label API key (Enter = keep$( [[ -n "$cur" ]] && echo current || echo none ), x = remove): " k || return 0
+    if [[ "$k" == "x" || "$k" == "X" ]]; then
+      auth_write "$id" ""
+      echo "Removed $label key."
+    elif [[ -z "$k" ]]; then
+      echo "Kept as-is."
+    else
+      tries=0
+      if [[ "$id" == "openrouter" ]]; then
+        while :; do
+          or_verify "$k" && rc=0 || rc=$?
+          (( rc == 0 || rc == 2 )) && break
+          tries=$((tries + 1))
+          if (( tries >= 3 )); then
+            echo "OpenRouter keeps rejecting that key — not saved. Try again later with 'oclaude setup'." >&2
+            k=""
+            break
+          fi
+          echo "OpenRouter rejected that key (invalid). Try again (Enter to abort):"
+          read -r k || k=""
+          [[ -n "$k" ]] || break
+        done
+        if [[ -n "$k" && $rc == 2 ]]; then
+          echo "(couldn't reach OpenRouter to verify — saving anyway)"
+        fi
+      fi
+      if [[ -n "$k" ]]; then
+        auth_write "$id" "$k"
+        echo "Saved $label key."
+      fi
+    fi
+    echo
+  done
+}
+
+cmd_models() { # $1 = optional case-insensitive filter
+  catalog || { echo "Couldn't fetch the OpenRouter model list (offline, no usable cache)." >&2; exit 1; }
+  python3 - "$MODELS_CACHE" "${1:-}" <<'PY'
+import json, sys
+data = json.load(open(sys.argv[1])).get('data', [])
+q = sys.argv[2].lower()
+
+def price(p, k):
+    try:
+        return float((p or {}).get(k) or 0) * 1e6
+    except (TypeError, ValueError):
+        return 0.0
+
+rows = []
+for m in data:
+    mid = m.get('id', '')
+    if q and q not in mid.lower():
+        continue
+    p = m.get('pricing', {})
+    rows.append((mid, m.get('context_length') or 0, price(p, 'prompt'), price(p, 'completion')))
+rows.sort()
+if not rows:
+    print(f"no models match '{sys.argv[2]}'")
+    sys.exit(0)
+w = max([len(r[0]) for r in rows] + [len('MODEL')])
+print(f"{'MODEL':<{w}}  {'CONTEXT':>10}  {'PROMPT $/M':>10}  {'COMPL $/M':>10}")
+for mid, ctx, pp, pc in rows:
+    print(f"{mid:<{w}}  {ctx:>10}  {pp:>10.3f}  {pc:>10.3f}")
+print(f"\n{len(rows)} model(s); use as OPENROUTER_MODEL=<id> oclaude 8")
+PY
+}
+
+cmd_update() {
+  local dest tmp
+  dest="$(command -v oclaude 2>/dev/null || true)"
+  [[ -n "$dest" ]] || dest="$0"
+  echo "Updating $dest ..."
+  tmp="$(mktemp)"
+  if ! curl -fsSL --max-time 30 "$REPO_RAW/bin/oclaude" -o "$tmp"; then
+    rm -f "$tmp"; echo "Download failed." >&2; exit 1
+  fi
+  bash -n "$tmp" && grep -q '^#!/usr/bin/env bash' "$tmp" || {
+    rm -f "$tmp"; echo "Downloaded script failed sanity checks." >&2; exit 1; }
+  cat "$tmp" > "$dest" && chmod +x "$dest"
+  rm -f "$tmp"
+  echo "Updated: $("$dest" version)"
+}
+
+usage() {
+  cat <<EOF
+oclaude $VERSION — run Claude Code against alternative providers/plans.
+
+Usage:
+  oclaude                 interactive plan menu
+  oclaude <plan|number>   launch directly (unique id prefix ok); extra args pass to claude
+  oclaude setup           add/remove API keys (stored in opencode's auth.json)
+  oclaude models [filter] list OpenRouter models (fetched live, cached)
+  oclaude update          self-update from the repo
+  oclaude help | version
+
+Env:
+  OPENROUTER_API_KEY    OpenRouter key (wins over the stored one)
+  OPENROUTER_MODEL      model id for plan 8 (alias or dated slug, resolved live)
+  OCLAUDE_OFFLINE=1     never hit the network; cached/fallback values only
+  OCLAUDE_MODELS_TTL    model-cache seconds (default 86400)
+  OCLAUDE_SKIP_VERIFY=1 skip OpenRouter key validation in setup
+EOF
+}
+
+case "${1:-}" in
+  setup)   shift; cmd_setup "$@"; exit 0 ;;
+  models)  shift; cmd_models "${1:-}"; exit 0 ;;
+  update)  cmd_update; exit 0 ;;
+  help|-h|--help) usage; exit 0 ;;
+  version|--version|-V) echo "oclaude $VERSION"; exit 0 ;;
+esac
+
+# --- plan selection ---------------------------------------------------------
+
+idx=-1
+if (( $# > 0 )) && [[ "$1" != -* ]]; then
+  arg="$1"
+  shift
+  if [[ "$arg" =~ ^[0-9]+$ ]]; then
+    idx=$((arg - 1))
+  else
+    for i in "${!PLAN_IDS[@]}"; do
+      if [[ "${PLAN_IDS[$i]}" == "$arg"* ]]; then
+        if (( idx >= 0 )); then
+          echo "'$arg' matches more than one plan, be more specific" >&2
+          exit 1
+        fi
+        idx="$i"
+      fi
+    done
+  fi
+  if (( idx < 0 || idx >= ${#PLAN_IDS[@]} )); then
+    echo "Invalid choice '$arg'" >&2
+    exit 1
+  fi
+else
+  configured=""
+  if [[ -f "$AUTH_FILE" ]]; then
+    configured="$(python3 - "$AUTH_FILE" <<'PY'
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+except Exception:
+    sys.exit(0)
+print(' '.join(k for k, v in d.items() if isinstance(v, dict) and v.get('key')))
+PY
+)" || configured=""
+  fi
+  [[ -n "${OPENROUTER_API_KEY:-}" ]] && configured="$configured openrouter"
+  echo "Select a plan for Claude Code:"
+  for i in "${!PLAN_LABELS[@]}"; do
+    id="${PLAN_IDS[$i]}"
+    mark=""
+    case "$id" in
+      anthropic) command -v claude >/dev/null 2>&1 && mark=" ✓" ;;
+      openrouter-*) [[ " $configured " == *" openrouter "* ]] && mark=" ✓" ;;
+      *) [[ " $configured " == *" $id "* ]] && mark=" ✓" ;;
+    esac
+    printf '  %d) %s%s\n' "$((i + 1))" "${PLAN_LABELS[$i]}" "$mark"
+  done
+  read -r -p "> " choice
+  [[ "$choice" =~ ^[0-9]+$ ]] || { echo "Invalid choice" >&2; exit 1; }
+  idx=$((choice - 1))
+  if (( idx < 0 || idx >= ${#PLAN_IDS[@]} )); then
+    echo "Invalid choice" >&2
+    exit 1
+  fi
 fi
 plan="${PLAN_IDS[$idx]}"
 
@@ -37,16 +332,47 @@ if [[ "$plan" == "anthropic" ]]; then
   exec claude "$@"
 fi
 
-key=$(python3 -c "
-import json
-with open('$AUTH_FILE') as f:
-    d = json.load(f)
-print(d['$plan']['key'])
-")
+# --- key: stored, env, or pasted on the spot ---------------------------------
 
+case "$plan" in
+  openrouter-*) auth_id="openrouter" ;;
+  *)            auth_id="$plan" ;;
+esac
+
+key=""
+[[ "$auth_id" == "openrouter" ]] && key="${OPENROUTER_API_KEY:-}"
+[[ -z "$key" ]] && key="$(auth_get "$auth_id")"
 if [[ -z "$key" ]]; then
-  echo "No API key found for $plan in opencode auth.json" >&2
-  exit 1
+  if [[ -t 0 ]]; then
+    echo "No $auth_id API key configured."
+    read -r -p "Paste it now to save & use (Enter to abort): " key || key=""
+    [[ -n "$key" ]] || { echo "No key given — run 'oclaude setup' anytime."; exit 1; }
+    if [[ "$auth_id" == "openrouter" ]]; then
+      tries=0; rc=2
+      while :; do
+        or_verify "$key" && rc=0 || rc=$?
+        (( rc == 0 || rc == 2 )) && break
+        tries=$((tries + 1))
+        if (( tries >= 3 )); then echo "Key rejected — not saved."; exit 1; fi
+        echo "OpenRouter rejected that key. Try again (Enter to abort):"
+        read -r key || key=""
+        [[ -n "$key" ]] || exit 1
+      done
+      [[ $rc == 2 ]] && echo "(couldn't reach OpenRouter to verify — saving anyway)"
+    fi
+    auth_write "$auth_id" "$key"
+    echo "Saved to $AUTH_FILE"
+  else
+    echo "No $auth_id key found. Run 'oclaude setup' or re-run oclaude in a terminal to paste one." >&2
+    exit 1
+  fi
+fi
+
+# --- env vars per plan --------------------------------------------------------
+
+HAVE_CATALOG=0
+if [[ "$plan" == openrouter-* ]]; then
+  catalog && HAVE_CATALOG=1 || true
 fi
 
 case "$plan" in
@@ -75,6 +401,57 @@ case "$plan" in
     export ANTHROPIC_DEFAULT_OPUS_MODEL="qwen3.8-max"
     export CLAUDE_CODE_SUBAGENT_MODEL="qwen3.7-max"
     export CLAUDE_CODE_MAX_CONTEXT_TOKENS="983616"
+    ;;
+  openrouter-glm)
+    export ANTHROPIC_BASE_URL="$OPENROUTER_API"
+    export ANTHROPIC_DEFAULT_HAIKU_MODEL="$(resolve_model z-ai/glm-4.7 z-ai/glm-4.7)"
+    export ANTHROPIC_DEFAULT_SONNET_MODEL="$(resolve_model z-ai/glm-5.2 z-ai/glm-5.2)"
+    export ANTHROPIC_DEFAULT_OPUS_MODEL="$ANTHROPIC_DEFAULT_SONNET_MODEL"
+    export CLAUDE_CODE_AUTO_COMPACT_WINDOW="1000000"
+    export CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY="1"
+    ;;
+  openrouter-minimax)
+    export ANTHROPIC_BASE_URL="$OPENROUTER_API"
+    export ANTHROPIC_MODEL="$(resolve_model minimax/minimax-m3 minimax/minimax-m3)"
+    export ANTHROPIC_DEFAULT_HAIKU_MODEL="$ANTHROPIC_MODEL"
+    export ANTHROPIC_DEFAULT_SONNET_MODEL="$ANTHROPIC_MODEL"
+    export ANTHROPIC_DEFAULT_OPUS_MODEL="$ANTHROPIC_MODEL"
+    export CLAUDE_CODE_AUTO_COMPACT_WINDOW="1000000"
+    export CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY="1"
+    ;;
+  openrouter-qwen)
+    qw_max="$(resolve_model qwen/qwen3.8-max qwen/qwen3.8-max-0902)"
+    [[ "$qw_max" != "qwen/qwen3.8-max-0902" ]] && echo "(resolved qwen3.8-max -> $qw_max)"
+    export ANTHROPIC_BASE_URL="$OPENROUTER_API"
+    export ANTHROPIC_MODEL="$qw_max"
+    export ANTHROPIC_DEFAULT_HAIKU_MODEL="$(resolve_model qwen/qwen3.6-flash qwen/qwen3.6-flash)"
+    export ANTHROPIC_DEFAULT_SONNET_MODEL="$qw_max"
+    export ANTHROPIC_DEFAULT_OPUS_MODEL="$qw_max"
+    export CLAUDE_CODE_SUBAGENT_MODEL="$(resolve_model qwen/qwen3.7-max qwen/qwen3.7-max)"
+    export CLAUDE_CODE_MAX_CONTEXT_TOKENS="983616"
+    export CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY="1"
+    ;;
+  openrouter-custom)
+    if [[ -z "${OPENROUTER_MODEL:-}" ]]; then
+      echo "Set OPENROUTER_MODEL to an OpenRouter model id to use this plan, e.g.:" >&2
+      echo "  OPENROUTER_MODEL=z-ai/glm-5.3 oclaude 8   (browse: oclaude models)" >&2
+      exit 1
+    fi
+    resolved="$(resolve_model "$OPENROUTER_MODEL" "")"
+    if [[ -z "$resolved" ]]; then
+      if (( HAVE_CATALOG )); then
+        echo "'$OPENROUTER_MODEL' not found in the OpenRouter catalog." >&2
+        echo "Browse with: oclaude models | grep -i '${OPENROUTER_MODEL%%/*}'" >&2
+        exit 1
+      fi
+      resolved="$OPENROUTER_MODEL" # offline, no catalog: pass through as-is
+    fi
+    export ANTHROPIC_BASE_URL="$OPENROUTER_API"
+    export ANTHROPIC_MODEL="$resolved"
+    export ANTHROPIC_DEFAULT_HAIKU_MODEL="$resolved"
+    export ANTHROPIC_DEFAULT_SONNET_MODEL="$resolved"
+    export ANTHROPIC_DEFAULT_OPUS_MODEL="$resolved"
+    export CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY="1"
     ;;
 esac
 
