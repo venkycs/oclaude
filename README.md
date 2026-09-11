@@ -11,6 +11,34 @@ opencode's own format (`~/.local/share/opencode/auth.json`), created for you by 
 If you already use opencode, your existing keys are picked up as-is; if you don't, oclaude
 manages that file itself.
 
+## How it works
+
+oclaude is a single bash script that sits between you and `claude`:
+
+1. **You pick a plan** — from the interactive menu, or upfront: `oclaude 2`, `oclaude zai-t`,
+   `oclaude openrouter-qwen -p "..."`.
+2. **It loads that plan's API key** from `~/.local/share/opencode/auth.json` (mode `0600`) — or,
+   if none is stored and you're in a terminal, asks you to paste one and saves it there. Keys are
+   only ever sent to the provider they belong to.
+3. **It `exec`s straight into `claude`** with exactly the environment that plan needs:
+   `ANTHROPIC_BASE_URL` (the provider's Anthropic-protocol endpoint), `ANTHROPIC_AUTH_TOKEN`
+   (the key), and the model-tier vars (`ANTHROPIC_DEFAULT_HAIKU/SONNET/OPUS_MODEL`, …).
+
+Nothing is written to any Claude Code config file, and your shell's environment is untouched —
+the overrides exist only inside the launched process. Close it, and everything is back to your
+normal Anthropic setup (`oclaude anthropic` / plan 5 also launches `claude` with all overrides
+explicitly unset).
+
+Two behaviors worth knowing:
+
+- **The stored key always wins.** If you `export ANTHROPIC_AUTH_TOKEN=...` in your shell and
+  then launch a keyed plan, oclaude replaces it with the key stored for that plan. Keys are
+  managed in `auth.json` via `oclaude setup`, not in your shell profile. (The one exception:
+  `OPENROUTER_API_KEY` beats the stored OpenRouter key.)
+- **`ANTHROPIC_API_KEY` is unset on purpose** — these providers authenticate with a Bearer
+  `ANTHROPIC_AUTH_TOKEN`, and leaving `ANTHROPIC_API_KEY` set makes Claude Code send the wrong
+  header.
+
 ## One-touch install
 
 ```sh
@@ -67,6 +95,37 @@ OPENROUTER_MODEL=z-ai/glm-5.3 oclaude 9   # any model OpenRouter serves
 If a plan's key is missing and you're in a terminal, oclaude offers to take it right there and
 saves it (OpenRouter keys are validated against the API before storing).
 
+## Configuration: API keys
+
+```sh
+oclaude setup
+```
+
+walks you through every provider, shows a masked form of what's already stored (`sk-or-v1…aaaa`),
+and lets you paste a new key or remove the stored one (`x`). Nothing else is configurable —
+plans, endpoints, and model mappings are pinned in the script.
+
+Where each key comes from:
+
+| Provider | Get a key at | Notes |
+|---|---|---|
+| Z.AI Coding Plan | [z.ai → API Keys](https://z.ai/manage-apikey/apikey-list) | your personal (developer) plan; bills its own quota |
+| Z.AI Coding Teams | [z.ai → Team Coding Plan → My Plan](https://z.ai/manage-apikey/coding-plan/team/my-plan) | **not interchangeable** with personal keys — team quota only applies when the team key is used |
+| MiniMax | MiniMax platform console | token plan |
+| Alibaba (Qwen) | Alibaba Cloud Model Studio (token plan) | |
+| OpenRouter | [openrouter.ai/keys](https://openrouter.ai/keys) | prepaid credit; serves every model above |
+
+The two Z.ai entries exist precisely because of that table's second row: developer and Teams
+plans share one endpoint and the same models, and only the key decides whose quota is billed —
+so oclaude keeps two entries (`zai-c`, `zai-t`) with two separately stored keys.
+
+Key resolution, in order, per launch:
+
+1. `OPENROUTER_API_KEY` in your environment (OpenRouter plans only) — wins over the stored key;
+2. the key stored in `auth.json` for that plan;
+3. pasted on the spot when launched from a terminal (then saved for next time). Without a
+   terminal, a missing key is a clean error pointing at `oclaude setup`.
+
 ## Intelligent model handling
 
 The OpenRouter options fetch OpenRouter's live model catalog (cached 24 h in
@@ -75,7 +134,7 @@ The OpenRouter options fetch OpenRouter's live model catalog (cached 24 h in
 - **Alias resolution** — you (and the built-in plans) say `qwen/qwen3.8-max`, oclaude resolves it
   to the newest dated snapshot (e.g. `qwen/qwen3.8-max-0902`) automatically. Plans never go stale
   when OpenRouter rotates snapshots.
-- **Unknown models rejected up front** — `OPENROUTER_MODEL=acme/nope oclaude 8` fails with a
+- **Unknown models rejected up front** — `OPENROUTER_MODEL=acme/nope oclaude 9` fails with a
   pointer to `oclaude models` instead of a cryptic first-request error.
 - **Gateway model discovery** — OpenRouter plans set `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1`,
   so Claude Code's `/model` picker lists what the gateway actually serves.
@@ -103,7 +162,7 @@ The OpenRouter options fetch OpenRouter's live model catalog (cached 24 h in
 | Env | Meaning |
 |---|---|
 | `OPENROUTER_API_KEY` | OpenRouter key; wins over the stored one |
-| `OPENROUTER_MODEL` | model for plan 8 (alias or dated slug) |
+| `OPENROUTER_MODEL` | model for plan 9 (alias or dated slug) |
 | `OCLAUDE_OFFLINE=1` | never hit the network; cached/pinned values only |
 | `OCLAUDE_MODELS_TTL` | catalog cache seconds (default 86400) |
 | `OCLAUDE_SKIP_VERIFY=1` | skip OpenRouter key validation in setup |
