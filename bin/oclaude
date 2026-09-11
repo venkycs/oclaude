@@ -5,7 +5,7 @@
 # (~/.local/share/opencode/auth.json), created on demand by `oclaude setup`.
 set -euo pipefail
 
-VERSION="1.1.0"
+VERSION="1.2.0"
 AUTH_FILE="$HOME/.local/share/opencode/auth.json"
 CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/oclaude"
 MODELS_CACHE="$CACHE_DIR/openrouter-models.json"
@@ -15,10 +15,11 @@ OPENROUTER_API="https://openrouter.ai/api"
 OPENROUTER_KEY_URL="https://openrouter.ai/api/v1/key"
 OPENROUTER_MODELS_URL="https://openrouter.ai/api/v1/models"
 
-PLAN_IDS=(zai-coding-plan minimax-coding-plan alibaba-token-plan anthropic \
+PLAN_IDS=(zai-coding-plan zai-teams-plan minimax-coding-plan alibaba-token-plan anthropic \
           openrouter-glm openrouter-minimax openrouter-qwen openrouter-custom)
 PLAN_LABELS=(
   "Z.AI Coding Plan (GLM)"
+  "Z.AI Coding Teams (GLM)"
   "MiniMax Token Plan"
   "Alibaba Token Plan (Qwen)"
   "Anthropic default (your normal Claude account/API key)"
@@ -29,8 +30,8 @@ PLAN_LABELS=(
 )
 
 # auth.json entries oclaude can manage, in setup-menu order.
-PROVIDERS=(openrouter zai-coding-plan minimax-coding-plan alibaba-token-plan)
-PROVIDER_LABELS=("OpenRouter" "Z.AI Coding Plan (GLM)" "MiniMax Token Plan" "Alibaba Token Plan (Qwen)")
+PROVIDERS=(openrouter zai-coding-plan zai-teams-plan minimax-coding-plan alibaba-token-plan)
+PROVIDER_LABELS=("OpenRouter" "Z.AI Coding Plan (GLM)" "Z.AI Coding Teams (GLM)" "MiniMax Token Plan" "Alibaba Token Plan (Qwen)")
 
 # --- auth.json helpers (opencode-compatible) -------------------------------
 
@@ -376,7 +377,7 @@ if [[ "$plan" == openrouter-* ]]; then
 fi
 
 case "$plan" in
-  zai-coding-plan)
+  zai-coding-plan|zai-teams-plan)
     export ANTHROPIC_BASE_URL="https://api.z.ai/api/anthropic"
     export ANTHROPIC_DEFAULT_HAIKU_MODEL="glm-5.3-flash"
     export ANTHROPIC_DEFAULT_SONNET_MODEL="glm-5.3"

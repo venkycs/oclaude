@@ -34,13 +34,14 @@ You'll get a menu (`✓` = a key is configured):
 ```
 Select a plan for Claude Code:
   1) Z.AI Coding Plan (GLM)
-  2) MiniMax Token Plan
-  3) Alibaba Token Plan (Qwen)
-  4) Anthropic default (your normal Claude account/API key) ✓
-  5) OpenRouter: Z.AI GLM ✓
-  6) OpenRouter: MiniMax ✓
-  7) OpenRouter: Qwen ✓
-  8) OpenRouter: any model ($OPENROUTER_MODEL) ✓
+  2) Z.AI Coding Teams (GLM)
+  3) MiniMax Token Plan
+  4) Alibaba Token Plan (Qwen)
+  5) Anthropic default (your normal Claude account/API key) ✓
+  6) OpenRouter: Z.AI GLM ✓
+  7) OpenRouter: MiniMax ✓
+  8) OpenRouter: Qwen ✓
+  9) OpenRouter: any model ($OPENROUTER_MODEL) ✓
 >
 ```
 
@@ -57,10 +58,10 @@ oclaude -p "fix the failing test"
 Give the plan as the first argument — menu number, plan id, or any unique prefix:
 
 ```sh
-oclaude zai
-oclaude 7
+oclaude zai-c          # Z.AI Coding Plan (developers); zai-t for the Teams plan
+oclaude 8
 oclaude openrouter-qwen -p "..."
-OPENROUTER_MODEL=z-ai/glm-5.3 oclaude 8   # any model OpenRouter serves
+OPENROUTER_MODEL=z-ai/glm-5.3 oclaude 9   # any model OpenRouter serves
 ```
 
 If a plan's key is missing and you're in a terminal, oclaude offers to take it right there and
@@ -112,7 +113,8 @@ The OpenRouter options fetch OpenRouter's live model catalog (cached 24 h in
 
 | Plan | Base URL | Models |
 |---|---|---|
-| Z.ai (GLM) | `api.z.ai/api/anthropic` | Haiku → `glm-4.7`, Sonnet/Opus → `glm-5.2` |
+| Z.ai Coding Plan (GLM) | `api.z.ai/api/anthropic` | Haiku → `glm-5.3-flash`, Sonnet/Opus → `glm-5.3` |
+| Z.ai Coding Teams (GLM) | `api.z.ai/api/anthropic` | same as Coding Plan, but billed to your Team key |
 | MiniMax | `api.minimax.io/anthropic` | all tiers → `MiniMax-M3` |
 | Alibaba (Qwen) | `token-plan.ap-southeast-1.maas.aliyuncs.com/apps/anthropic` | Haiku → `qwen3.6-flash`, Sonnet/Opus → `qwen3.8-max`, subagent → `qwen3.7-max` |
 | Anthropic default | — | unsets all overrides |
@@ -125,6 +127,11 @@ The OpenRouter plans mirror the direct ones but bill to your OpenRouter credit. 
 Claude Code's native Anthropic protocol (`https://openrouter.ai/api`, Bearer auth via
 `ANTHROPIC_AUTH_TOKEN`), so no proxy is needed; `ANTHROPIC_API_KEY` stays unset so Claude Code
 uses the right header.
+
+The two Z.ai entries use the same endpoint and models but keep **separate stored keys** — per
+Z.ai's docs a Team Plan key is not interchangeable with other Z.ai keys, and team quota only
+applies when the Team key is used. Pick `zai-c` for your developer (individual) coding plan,
+`zai-t` for the Team plan.
 
 ## Requirements
 
